@@ -1,0 +1,22 @@
+---
+# vault.yml.example – Copy to vault.yml and encrypt with: ansible-vault encrypt vault.yml
+# NEVER commit vault.yml to version control.
+
+vault_host_admin_user: "Administrator"
+vault_host_admin_pass: "CHANGE_ME"
+
+vault_vm_admin_user:   "Administrator"
+vault_vm_admin_pass:   "CHANGE_ME"
+
+vault_idrac_user:      "root"
+vault_idrac_pass:      "CHANGE_ME"
+
+vault_asa_user:        "admin"
+vault_asa_pass:        "CHANGE_ME"
+vault_asa_enable:      "CHANGE_ME"
+
+vault_arc_sp_app_id:   "CHANGE_ME"
+vault_arc_sp_secret:   "CHANGE_ME"
+
+vault_bitlocker_pin:   "CHANGE_ME"
+vault_snmp_community:  "CHANGE_ME"

@@ -1,0 +1,43 @@
+---
+# Global variables – non-sensitive
+# Sensitive values are in vault.yml (ansible-vault encrypted)
+
+# ── Azure ────────────────────────────────────────────────────────────────────
+azure_subscription_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+azure_tenant_id:        "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+azure_resource_group:   "rg-clinical-poc"
+azure_location:         "uksouth"
+arc_sp_app_id:          "{{ vault_arc_sp_app_id }}"
+arc_sp_secret:          "{{ vault_arc_sp_secret }}"
+
+# ── Network ──────────────────────────────────────────────────────────────────
+clinical_vlan:    10
+mgmt_vlan:        20
+clinical_subnet:  "192.168.10.0/24"
+mgmt_subnet:      "192.168.20.0/24"
+vpn_pool_subnet:  "192.168.100.0/24"
+dns_server:       "192.168.20.5"
+ntp_server:       "169.254.169.123"
+
+# ── Windows Server ───────────────────────────────────────────────────────────
+domain_name:      "corp.clinical.local"
+domain_netbios:   "CLINICAL"
+
+# ── Hyper-V ──────────────────────────────────────────────────────────────────
+vm_switch_name:   "Clinical-vSwitch"
+vm_switch_nic:    "NIC-Clinical"
+vm_storage_path:  "D:\\VMs"
+
+# ── ASA ──────────────────────────────────────────────────────────────────────
+asa_outside_ip:   "203.0.113.10"
+asa_inside_ip:    "192.168.10.1"
+asa_dmz_ip:       "192.168.20.1"
+asa_vpn_pool_start: "192.168.100.10"
+asa_vpn_pool_end:   "192.168.100.100"
+asa_syslog_server:  "192.168.20.20"
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+law_workspace_name: "law-clinical-poc"
+rsv_name:           "rsv-clinical-poc"
+backup_policy_name: "policy-clinical-vms"
+backup_retention_days: 30

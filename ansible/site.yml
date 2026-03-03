@@ -1,0 +1,46 @@
+---
+# =============================================================================
+# Azure Local POC – Master Ansible Playbook
+# Executes all 10 deployment steps in sequence
+# Usage: ansible-playbook site.yml -i inventory/hosts.yml --ask-vault-pass
+# =============================================================================
+
+- name: "Step 1 – Prepare Dell Server BIOS and Firmware"
+  import_playbook: playbooks/01_dell_bios.yml
+  tags: [step1, bios, firmware]
+
+- name: "Step 2 – Configure Windows Server 2022"
+  import_playbook: playbooks/02_windows_server.yml
+  tags: [step2, windows]
+
+- name: "Step 3 – Enable Hyper-V, BitLocker, Core Isolation"
+  import_playbook: playbooks/03_hyperv_security.yml
+  tags: [step3, hyperv, security]
+
+- name: "Step 4 – Register Host with Azure Arc"
+  import_playbook: playbooks/04_azure_arc_host.yml
+  tags: [step4, arc]
+
+- name: "Step 5 – Configure Cisco ASA"
+  import_playbook: playbooks/05_cisco_asa.yml
+  tags: [step5, asa, network]
+
+- name: "Step 6 – Deploy Clinical VM on Hyper-V"
+  import_playbook: playbooks/06_clinical_vm.yml
+  tags: [step6, vm]
+
+- name: "Step 7 – Install Azure Arc Agent on VM"
+  import_playbook: playbooks/07_arc_vm.yml
+  tags: [step7, arc, vm]
+
+- name: "Step 8 – Enable Azure Backup and Monitoring"
+  import_playbook: playbooks/08_backup_monitoring.yml
+  tags: [step8, backup, monitoring]
+
+- name: "Step 9 – Validate Remote Access and Logs"
+  import_playbook: playbooks/09_validate_access.yml
+  tags: [step9, validate]
+
+- name: "Step 10 – Security Testing"
+  import_playbook: playbooks/10_security_testing.yml
+  tags: [step10, security, testing]
