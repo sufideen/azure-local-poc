@@ -1,0 +1,48 @@
+---
+# Cisco ASA Deployment Configuration
+# Azure Local POC – Clinical Environment
+# IMPORTANT: Do NOT commit real passwords. Use ansible-vault or environment variables.
+
+asa:
+  # ── Connection ────────────────────────────────────────────────────────────
+  host:     "192.168.20.254"    # ASA management IP (reachable from deployment host)
+  username: "admin"
+  port:     22
+  # Passwords are prompted at runtime (not stored here)
+
+  # ── Identity ──────────────────────────────────────────────────────────────
+  hostname:    "ASA-CLINICAL-POC"
+  domain_name: "corp.clinical.local"
+
+  # ── Interfaces ────────────────────────────────────────────────────────────
+  outside_ip:   "203.0.113.10"
+  outside_mask: "255.255.255.0"
+  outside_gw:   "203.0.113.1"
+
+  inside_ip:    "192.168.10.1"
+  inside_mask:  "255.255.255.0"
+
+  dmz_ip:       "192.168.20.1"
+  dmz_mask:     "255.255.255.0"
+
+  # ── VPN / AnyConnect ──────────────────────────────────────────────────────
+  vpn_pool_start: "192.168.100.10"
+  vpn_pool_end:   "192.168.100.100"
+  vpn_pool_mask:  "255.255.255.0"
+  vpn_dns:        "192.168.20.5"
+  vpn_tunnel_group: "CLINICAL-SAML"
+  vpn_group_alias:  "ClinicalVPN"
+
+  # ── SAML / Entra ID ───────────────────────────────────────────────────────
+  # Replace with your Microsoft Entra ID (Azure AD) tenant GUID
+  tenant_id:       "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  asa_public_fqdn: "asa-clinical-poc.corp.clinical.local"
+
+  # ── Monitoring ────────────────────────────────────────────────────────────
+  syslog_server:  "192.168.20.20"
+  snmp_community: "CHANGE_ME_IN_VAULT"   # Use ansible-vault for real value
+  snmp_server:    "192.168.20.20"
+
+  # ── Crypto ────────────────────────────────────────────────────────────────
+  rsa_modulus: 4096
+  rsa_label:   "ASA-VPN-KEY"

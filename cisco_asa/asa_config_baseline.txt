@@ -1,0 +1,209 @@
+! ============================================================
+! Cisco ASA Baseline Configuration
+! Azure Local POC – Clinical Environment
+! Model: ASA 5506-X | ASA Version: 9.18(x)
+! Date: 2026-03-03
+! ============================================================
+!
+! PRE-REQUISITES:
+!   - ASA is factory reset or in known-good state
+!   - Smart License registered and active
+!   - AnyConnect Apex licence applied
+!   - AnyConnect pkg uploaded to disk0:
+!     - anyconnect-win-<version>-webdeploy-k9.pkg
+!   - Client VPN profile XML on disk0:
+!     - clinical_vpn_profile.xml
+!   - Entra ID SAML certificate imported as ENTRA-ID-CERT trustpoint
+!
+! TO APPLY: copy this file to a TFTP server then:
+!   copy tftp://192.168.20.20/asa_config_baseline.txt running-config
+! OR paste into ASA CLI in global config mode
+! ============================================================
+
+! --- Global ---
+hostname ASA-CLINICAL-POC
+domain-name corp.clinical.local
+service password-encryption
+clock timezone UTC 0
+clock summer-time BST recurring last Sun Mar 1:00 last Sun Oct 1:00
+no http server enable
+names
+
+dns server-group DefaultDNS
+ name-server 8.8.8.8
+ name-server 8.8.4.4
+
+! --- Interfaces ---
+interface GigabitEthernet1/1
+ description OUTSIDE-INTERNET
+ nameif outside
+ security-level 0
+ ip address 203.0.113.10 255.255.255.0
+ no shutdown
+
+interface GigabitEthernet1/2
+ description INSIDE-CLINICAL-VLAN10
+ nameif inside
+ security-level 100
+ ip address 192.168.10.1 255.255.255.0
+ no shutdown
+
+interface GigabitEthernet1/3
+ description DMZ-MANAGEMENT-VLAN20
+ nameif dmz
+ security-level 50
+ ip address 192.168.20.1 255.255.255.0
+ no shutdown
+
+interface GigabitEthernet1/4
+ description UNUSED
+ shutdown
+
+! --- Routing ---
+route outside 0.0.0.0 0.0.0.0 203.0.113.1 1
+
+! --- Network Objects ---
+object network OBJ-INSIDE-NET
+ subnet 192.168.10.0 255.255.255.0
+ description Clinical VLAN 10
+
+object network OBJ-DMZ-NET
+ subnet 192.168.20.0 255.255.255.0
+ description Management VLAN 20
+
+object network OBJ-VPN-POOL
+ subnet 192.168.100.0 255.255.255.0
+ description AnyConnect VPN Client Pool
+
+! --- NAT ---
+nat (inside,outside) after-auto source dynamic OBJ-INSIDE-NET interface
+nat (dmz,outside) after-auto source dynamic OBJ-DMZ-NET interface
+nat (outside,inside) source static OBJ-VPN-POOL OBJ-VPN-POOL destination static OBJ-INSIDE-NET OBJ-INSIDE-NET no-proxy-arp route-lookup
+
+! --- ACLs ---
+access-list ACL-OUTSIDE-IN extended permit tcp any host 203.0.113.10 eq 443
+access-list ACL-OUTSIDE-IN extended permit udp any host 203.0.113.10 eq 443
+access-list ACL-OUTSIDE-IN extended deny ip any any log
+
+access-list ACL-INSIDE-OUT extended permit tcp 192.168.10.0 255.255.255.0 any eq 443
+access-list ACL-INSIDE-OUT extended permit tcp 192.168.10.0 255.255.255.0 any eq 80
+access-list ACL-INSIDE-OUT extended permit udp 192.168.10.0 255.255.255.0 any eq 53
+access-list ACL-INSIDE-OUT extended permit tcp 192.168.10.0 255.255.255.0 any eq 53
+access-list ACL-INSIDE-OUT extended permit udp 192.168.10.0 255.255.255.0 any eq 123
+access-list ACL-INSIDE-OUT extended deny ip 192.168.10.0 255.255.255.0 192.168.20.0 255.255.255.0 log
+access-list ACL-INSIDE-OUT extended deny ip any any log
+
+access-list ACL-VPN-TO-INSIDE extended permit tcp 192.168.100.0 255.255.255.0 192.168.10.0 255.255.255.0 eq 3389
+access-list ACL-VPN-TO-INSIDE extended permit tcp 192.168.100.0 255.255.255.0 192.168.10.0 255.255.255.0 eq 443
+access-list ACL-VPN-TO-INSIDE extended permit icmp 192.168.100.0 255.255.255.0 192.168.10.0 255.255.255.0
+access-list ACL-VPN-TO-INSIDE extended deny ip any any log
+
+access-list ACL-DMZ-TO-INSIDE extended permit tcp 192.168.20.0 255.255.255.0 192.168.10.0 255.255.255.0 eq 3389
+access-list ACL-DMZ-TO-INSIDE extended permit tcp 192.168.20.0 255.255.255.0 192.168.10.0 255.255.255.0 eq 5985
+access-list ACL-DMZ-TO-INSIDE extended permit icmp 192.168.20.0 255.255.255.0 192.168.10.0 255.255.255.0
+access-list ACL-DMZ-TO-INSIDE extended deny ip any any log
+
+access-list ACL-VPN-SPLIT standard permit 192.168.10.0 255.255.255.0
+access-list ACL-VPN-SPLIT standard permit 192.168.20.0 255.255.255.0
+
+access-group ACL-OUTSIDE-IN  in interface outside
+access-group ACL-INSIDE-OUT  in interface inside
+access-group ACL-DMZ-TO-INSIDE in interface dmz
+
+! --- TLS Policy ---
+ssl server-version tlsv1.2
+ssl cipher tlsv1.2 high
+ssl dh-group group14
+ssl trust-point SELF-SIGNED outside
+
+! --- RSA Key and Self-Signed Certificate ---
+! NOTE: Run interactively – cannot be pasted as config
+! crypto key generate rsa label ASA-VPN-KEY modulus 4096
+! crypto ca trustpoint SELF-SIGNED
+!  enrollment self
+!  subject-name CN=asa-clinical-poc.corp.clinical.local,OU=IT,O=Clinical,C=GB
+!  keypair ASA-VPN-KEY
+!  fqdn asa-clinical-poc.corp.clinical.local
+! crypto ca enroll SELF-SIGNED noconfirm
+
+! --- IKEv2 ---
+crypto ikev2 enable outside
+
+! --- WebVPN / AnyConnect ---
+webvpn
+ enable outside
+ anyconnect enable
+ anyconnect image disk0:/anyconnect-win-webdeploy-k9.pkg 1
+ anyconnect profiles CLINICAL-VPN-PROFILE disk0:/clinical_vpn_profile.xml
+ cache disable
+ error-recovery disable
+
+! --- SAML IdP (replace <TENANT_ID> with your Entra ID tenant GUID) ---
+saml idp https://sts.windows.net/<TENANT_ID>/
+ url sign-in  https://login.microsoftonline.com/<TENANT_ID>/saml2
+ url sign-out https://login.microsoftonline.com/<TENANT_ID>/saml2
+ base-url     https://203.0.113.10
+ trustpoint idp ENTRA-ID-CERT
+ trustpoint sp  SELF-SIGNED
+ no signature
+ timeout assertion 1800
+
+! --- Group Policy ---
+group-policy GP-CLINICAL-VPN internal
+group-policy GP-CLINICAL-VPN attributes
+ vpn-tunnel-protocol ssl-client
+ split-tunnel-policy tunnelspecified
+ split-tunnel-network-list value ACL-VPN-SPLIT
+ dns-server value 192.168.20.5
+ wins-server none
+ default-domain value corp.clinical.local
+ vpn-session-timeout 480
+ vpn-idle-timeout 30
+ anyconnect profiles value CLINICAL-VPN-PROFILE type user
+ webvpn
+  anyconnect keep-installer installed
+  anyconnect dtls enable
+  anyconnect mtu 1400
+
+! --- VPN Address Pool ---
+ip local pool VPN-ADDRESS-POOL 192.168.100.10-192.168.100.100 mask 255.255.255.0
+
+! --- Tunnel Group ---
+tunnel-group CLINICAL-SAML type remote-access
+tunnel-group CLINICAL-SAML general-attributes
+ address-pool VPN-ADDRESS-POOL
+ default-group-policy GP-CLINICAL-VPN
+ authorization-required
+tunnel-group CLINICAL-SAML webvpn-attributes
+ authentication saml
+ saml identity-provider https://sts.windows.net/<TENANT_ID>/
+ group-alias ClinicalVPN enable
+ without-csd
+
+! --- Syslog ---
+logging enable
+logging timestamp
+logging buffered informational
+logging host inside 192.168.20.20 udp/514
+logging trap informational
+logging facility 20
+logging device-id hostname
+
+! --- SSH ---
+ssh 192.168.20.0 255.255.255.0 dmz
+ssh 192.168.100.0 255.255.255.0 outside
+ssh timeout 10
+ssh version 2
+ssh key-exchange group dh-group14-sha256
+aaa authentication ssh console LOCAL
+
+! --- NTP ---
+ntp server 169.254.169.123
+
+! --- Threat Detection ---
+threat-detection basic-threat
+threat-detection statistics
+threat-detection statistics tcp-intercept rate-interval 30 burst-rate 400 average-rate 200
+
+! --- Save ---
+write memory
