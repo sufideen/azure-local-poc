@@ -1,0 +1,146 @@
+---
+# =============================================================================
+# Step 1 – Prepare Dell Server (BIOS, Secure Boot, Firmware)
+# Uses Dell iDRAC Redfish API
+# =============================================================================
+
+- name: "Dell Server – BIOS and Firmware Preparation"
+  hosts: hyperv_hosts
+  gather_facts: false
+  vars:
+    idrac_base_url: "https://{{ idrac_ip }}/redfish/v1"
+
+  tasks:
+    - name: "Wait for iDRAC Redfish API to respond"
+      ansible.builtin.uri:
+        url: "{{ idrac_base_url }}/Systems/System.Embedded.1"
+        method: GET
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      register: system_info
+      until: system_info.status == 200
+      retries: 10
+      delay: 15
+      delegate_to: localhost
+
+    - name: "Display current system info"
+      ansible.builtin.debug:
+        msg:
+          - "Model:    {{ system_info.json.Model }}"
+          - "BIOS:     {{ system_info.json.BiosVersion }}"
+          - "SerialNo: {{ system_info.json.SerialNumber }}"
+      delegate_to: localhost
+
+    - name: "Get current BIOS settings"
+      ansible.builtin.uri:
+        url: "{{ idrac_base_url }}/Systems/System.Embedded.1/Bios"
+        method: GET
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+      register: bios_current
+      delegate_to: localhost
+
+    - name: "Set required BIOS attributes"
+      ansible.builtin.uri:
+        url: "{{ idrac_base_url }}/Systems/System.Embedded.1/Bios/Settings"
+        method: PATCH
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          Attributes:
+            BootMode:                     "Uefi"
+            SecureBoot:                   "Enabled"
+            SecureBootMode:               "DeployedMode"
+            ProcVirtualization:           "Enabled"      # VT-x
+            ProcX2Apic:                   "Enabled"
+            Sriov:                        "Enabled"
+            LogicalProc:                  "Enabled"      # Hyper-Threading
+            ProcCStates:                  "Enabled"
+            TpmSecurity:                  "OnWithPrebootMeasurements"
+            TpmActivation:                "Enabled"
+            TpmPpiClearOverride:          "Disabled"
+            MemMappedIOAbove4GB:          "Enabled"
+            OsWatchdogTimer:              "Disabled"
+            PxeDev1EnDis:                 "Disabled"     # Disable unused PXE
+        status_code: [200, 202]
+      register: bios_patch
+      delegate_to: localhost
+
+    - name: "Create BIOS settings job"
+      ansible.builtin.uri:
+        url: "{{ idrac_base_url }}/Managers/iDRAC.Embedded.1/Jobs"
+        method: POST
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          TargetSettingsURI: "/redfish/v1/Systems/System.Embedded.1/Bios/Settings"
+        status_code: [200, 202]
+      register: bios_job
+      delegate_to: localhost
+
+    - name: "Trigger graceful server reboot to apply BIOS settings"
+      ansible.builtin.uri:
+        url: "{{ idrac_base_url }}/Systems/System.Embedded.1/Actions/ComputerSystem.Reset"
+        method: POST
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          ResetType: "GracefulRestart"
+        status_code: [200, 202, 204]
+      delegate_to: localhost
+
+    - name: "Wait for server to come back online (120s)"
+      ansible.builtin.wait_for:
+        host: "{{ idrac_ip }}"
+        port: 443
+        delay: 60
+        timeout: 300
+      delegate_to: localhost
+
+    - name: "Verify Secure Boot is enabled post-reboot"
+      ansible.builtin.uri:
+        url: "{{ idrac_base_url }}/Systems/System.Embedded.1/SecureBoot"
+        method: GET
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+      register: secureboot_check
+      delegate_to: localhost
+
+    - name: "Assert Secure Boot is enabled"
+      ansible.builtin.assert:
+        that:
+          - secureboot_check.json.SecureBootEnable == true
+        fail_msg: "Secure Boot is NOT enabled – check BIOS settings"
+        success_msg: "Secure Boot verified: ENABLED"
+
+    - name: "Check firmware inventory"
+      ansible.builtin.uri:
+        url: "{{ idrac_base_url }}/UpdateService/FirmwareInventory"
+        method: GET
+        user: "{{ idrac_user }}"
+        password: "{{ idrac_pass }}"
+        force_basic_auth: true
+        validate_certs: false
+      register: firmware_inventory
+      delegate_to: localhost
+
+    - name: "Display firmware versions"
+      ansible.builtin.debug:
+        msg: "Firmware components: {{ firmware_inventory.json['Members'] | length }} found"
+      delegate_to: localhost

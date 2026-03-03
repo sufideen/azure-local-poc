@@ -1,0 +1,160 @@
+---
+# =============================================================================
+# Step 3 – Enable Hyper-V, BitLocker, Core Isolation / HVCI
+# =============================================================================
+
+- name: "Hyper-V, BitLocker and Core Isolation Setup"
+  hosts: hyperv_hosts
+  gather_facts: true
+
+  tasks:
+    # ── Hyper-V ──────────────────────────────────────────────────────────────
+    - name: "Install Hyper-V role and management tools"
+      ansible.windows.win_feature:
+        name:
+          - Hyper-V
+          - Hyper-V-Tools
+          - Hyper-V-PowerShell
+          - RSAT-Hyper-V-Tools
+        state: present
+        include_management_tools: true
+      register: hyperv_install
+
+    - name: "Reboot after Hyper-V installation"
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+      when: hyperv_install.reboot_required
+
+    - name: "Create external virtual switch for Clinical VLAN 10"
+      ansible.windows.win_shell: |
+        $sw = Get-VMSwitch -Name "{{ vm_switch_name }}" -ErrorAction SilentlyContinue
+        if (-not $sw) {
+          New-VMSwitch -Name "{{ vm_switch_name }}" `
+            -NetAdapterName "{{ vm_switch_nic }}" `
+            -AllowManagementOS $false
+          Write-Output "Created"
+        } else {
+          Write-Output "Exists"
+        }
+      register: vswitch_result
+      changed_when: "'Created' in vswitch_result.stdout"
+
+    - name: "Create internal switch for management VLAN 20"
+      ansible.windows.win_shell: |
+        $sw = Get-VMSwitch -Name "Mgmt-vSwitch" -ErrorAction SilentlyContinue
+        if (-not $sw) {
+          New-VMSwitch -Name "Mgmt-vSwitch" -SwitchType Internal
+          Write-Output "Created"
+        } else { Write-Output "Exists" }
+      register: mgmt_sw_result
+      changed_when: "'Created' in mgmt_sw_result.stdout"
+
+    - name: "Create VM storage directory"
+      ansible.windows.win_file:
+        path: "{{ vm_storage_path }}"
+        state: directory
+
+    # ── BitLocker ─────────────────────────────────────────────────────────────
+    - name: "Install BitLocker features"
+      ansible.windows.win_feature:
+        name:
+          - BitLocker
+          - BitLocker-NetworkUnlock
+          - RSAT-Feature-Tools-BitLocker
+        state: present
+        include_management_tools: true
+
+    - name: "Check if C: already has BitLocker enabled"
+      ansible.windows.win_shell: |
+        (Get-BitLockerVolume -MountPoint C:).ProtectionStatus
+      register: bl_status
+      changed_when: false
+
+    - name: "Enable BitLocker on OS drive (TPM + PIN)"
+      ansible.windows.win_shell: |
+        $pin = ConvertTo-SecureString "{{ vault_bitlocker_pin }}" -AsPlainText -Force
+        Add-BitLockerKeyProtector -MountPoint "C:" -TpmAndPinProtector -Pin $pin
+        Enable-BitLocker -MountPoint "C:" -EncryptionMethod XtsAes256 `
+          -TpmAndPinProtector -SkipHardwareTest
+      when: bl_status.stdout.strip() == "Off"
+      no_log: true   # Don't log PIN
+
+    - name: "Enable BitLocker on data drive D:"
+      ansible.windows.win_shell: |
+        $vol = Get-BitLockerVolume -MountPoint D: -ErrorAction SilentlyContinue
+        if ($vol.ProtectionStatus -eq "Off") {
+          Enable-BitLocker -MountPoint "D:" -EncryptionMethod XtsAes256 `
+            -RecoveryPasswordProtector
+          Write-Output "Enabled"
+        } else { Write-Output "Already enabled" }
+      register: bl_data
+      changed_when: "'Enabled' in bl_data.stdout"
+
+    - name: "Verify BitLocker status"
+      ansible.windows.win_shell: |
+        Get-BitLockerVolume | Select-Object MountPoint, EncryptionMethod,
+          VolumeStatus, ProtectionStatus | ConvertTo-Json
+      register: bl_verify
+      changed_when: false
+
+    - name: "Display BitLocker status"
+      ansible.builtin.debug:
+        msg: "{{ bl_verify.stdout | from_json }}"
+
+    # ── Core Isolation / HVCI ─────────────────────────────────────────────────
+    - name: "Enable Virtualization Based Security (VBS)"
+      ansible.windows.win_regedit:
+        path: "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard"
+        name: "EnableVirtualizationBasedSecurity"
+        data: 1
+        type: dword
+
+    - name: "Require TPM + Secure Boot for VBS"
+      ansible.windows.win_regedit:
+        path: "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard"
+        name: "RequirePlatformSecurityFeatures"
+        data: 3
+        type: dword
+
+    - name: "Enable Credential Guard"
+      ansible.windows.win_regedit:
+        path: "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard"
+        name: "LsaCfgFlags"
+        data: 1
+        type: dword
+
+    - name: "Enable HVCI (Memory Integrity)"
+      ansible.windows.win_regedit:
+        path: "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\HypervisorEnforcedCodeIntegrity"
+        name: "Enabled"
+        data: 1
+        type: dword
+
+    - name: "Enable Windows Defender real-time protection"
+      ansible.windows.win_shell: |
+        Set-MpPreference -DisableRealtimeMonitoring $false
+        Set-MpPreference -MAPSReporting Advanced
+        Set-MpPreference -SubmitSamplesConsent SendAllSamples
+        Set-MpPreference -EnableNetworkProtection Enabled
+        Update-MpSignature
+      changed_when: true
+
+    - name: "Reboot to apply HVCI and VBS settings"
+      ansible.windows.win_reboot:
+        reboot_timeout: 600
+        msg: "Rebooting to apply Core Isolation / HVCI settings"
+
+    - name: "Verify HVCI is running post-reboot"
+      ansible.windows.win_shell: |
+        $ci = Get-CimInstance -ClassName Win32_DeviceGuard `
+          -Namespace root\Microsoft\Windows\DeviceGuard
+        $ci.VirtualizationBasedSecurityStatus
+      register: hvci_verify
+      changed_when: false
+
+    - name: "Assert HVCI is running (status = 2)"
+      ansible.builtin.assert:
+        that:
+          - hvci_verify.stdout.strip() == "2"
+        fail_msg: "HVCI is NOT running (status={{ hvci_verify.stdout.strip() }}). Check VT-x/Secure Boot."
+        success_msg: "HVCI (Memory Integrity) is RUNNING."

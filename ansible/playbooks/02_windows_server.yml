@@ -1,0 +1,95 @@
+---
+# =============================================================================
+# Step 2 – Install and Configure Windows Server 2022 Azure Edition
+# Assumes OS is already installed; this configures post-install settings
+# =============================================================================
+
+- name: "Windows Server 2022 – Post-Install Configuration"
+  hosts: hyperv_hosts
+  gather_facts: true
+
+  tasks:
+    - name: "Set static IP on Management interface"
+      community.windows.win_ip_interface:
+        adapter_names: "Management"
+        ipv4:
+          - address: "{{ ansible_host }}/24"
+            gateway: "192.168.20.1"
+        dns:
+          - "{{ dns_server }}"
+          - "8.8.8.8"
+
+    - name: "Set computer name"
+      ansible.windows.win_hostname:
+        name: "AZ-LOCAL-HOST01"
+      register: hostname_result
+
+    - name: "Enable WinRM HTTPS listener"
+      ansible.windows.win_shell: |
+        $cert = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME `
+          -CertStoreLocation cert:\LocalMachine\My
+        New-WSManInstance WinRM/Config/Listener `
+          -SelectorSet @{Transport='HTTPS';Address='*'} `
+          -ValueSet @{Hostname=$env:COMPUTERNAME;CertificateThumbprint=$cert.Thumbprint}
+        netsh advfirewall firewall add rule name="WinRM HTTPS" `
+          protocol=TCP dir=in localport=5986 action=allow
+      changed_when: true
+
+    - name: "Configure Windows Firewall – allow management ports"
+      ansible.windows.win_firewall_rule:
+        name: "{{ item.name }}"
+        localport: "{{ item.port }}"
+        protocol: TCP
+        direction: in
+        action: allow
+        state: present
+        enabled: true
+      loop:
+        - { name: "WinRM-HTTP",  port: "5985" }
+        - { name: "WinRM-HTTPS", port: "5986" }
+        - { name: "RDP",         port: "3389" }
+
+    - name: "Set DNS client suffix search list"
+      ansible.windows.win_shell: |
+        Set-DnsClientGlobalSetting -SuffixSearchList @("{{ domain_name }}", "corp.local")
+
+    - name: "Configure NTP"
+      ansible.windows.win_shell: |
+        w32tm /config /syncfromflags:manual /manualpeerlist:"{{ ntp_server }},0x8"
+        w32tm /config /reliable:YES
+        Restart-Service w32tm
+        w32tm /resync /force
+      changed_when: true
+
+    - name: "Set timezone to UTC"
+      community.windows.win_timezone:
+        timezone: "UTC"
+
+    - name: "Install Windows Updates (critical and security)"
+      community.windows.win_updates:
+        category_names:
+          - CriticalUpdates
+          - SecurityUpdates
+          - UpdateRollups
+        state: installed
+        reboot: true
+        reboot_timeout: 1800
+      register: update_result
+
+    - name: "Display update result"
+      ansible.builtin.debug:
+        msg: "Updates installed: {{ update_result.installed_update_count }}"
+
+    - name: "Join domain"
+      ansible.windows.win_domain_membership:
+        dns_domain_name: "{{ domain_name }}"
+        domain_admin_user: "{{ vault_domain_admin_user | default(omit) }}"
+        domain_admin_password: "{{ vault_domain_admin_pass | default(omit) }}"
+        state: domain
+      register: domain_join
+      when: domain_name is defined
+
+    - name: "Reboot after domain join"
+      ansible.windows.win_reboot:
+        reboot_timeout: 300
+      when: domain_join.reboot_required | default(false)
