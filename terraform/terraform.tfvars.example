@@ -1,0 +1,33 @@
+# =============================================================================
+# terraform.tfvars.example
+# Copy to terraform.tfvars and populate with real values.
+# NEVER commit terraform.tfvars to version control.
+# =============================================================================
+
+subscription_id     = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+tenant_id           = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+location            = "uksouth"
+resource_group_name = "rg-clinical-poc"
+environment         = "POC"
+department          = "Clinical"
+
+# Log Analytics
+law_workspace_name = "law-clinical-poc"
+law_retention_days = 90
+
+# Recovery Services Vault
+rsv_name                       = "rsv-clinical-poc"
+backup_retention_daily_count   = 30
+backup_retention_weekly_count  = 12
+backup_retention_monthly_count = 12
+
+# Key Vault
+key_vault_name_prefix = "kv-clinical-poc"
+
+# Arc
+arc_sp_display_name  = "sp-arc-onboarding-clinical-poc"
+arc_host_machine_name = "az-local-host01"
+arc_vm_machine_name   = "clinical-vm-01"
+
+# Alerts
+alert_email = "clinical-it@corp.clinical.local"
