@@ -1,0 +1,364 @@
+---
+# =============================================================================
+# Step 5 – Configure Cisco ASA
+# Uses cisco.asa collection via ansible.netcommon.network_cli
+# =============================================================================
+
+- name: "Cisco ASA – Full Clinical Environment Configuration"
+  hosts: cisco_asa
+  gather_facts: false
+  connection: ansible.netcommon.network_cli
+
+  vars:
+    inside_net:   "192.168.10.0"
+    inside_mask:  "255.255.255.0"
+    dmz_net:      "192.168.20.0"
+    dmz_mask:     "255.255.255.0"
+    vpn_net:      "192.168.100.0"
+    vpn_mask:     "255.255.255.0"
+
+  tasks:
+    - name: "Gather ASA facts"
+      cisco.asa.asa_facts:
+        gather_subset:
+          - "!all"
+          - "config"
+      register: asa_facts
+
+    - name: "Display ASA version"
+      ansible.builtin.debug:
+        msg: "ASA Version: {{ asa_facts.ansible_facts.ansible_net_version }}"
+
+    # ── Global Settings ─────────────────────────────────────────────────────
+    - name: "Configure hostname and domain"
+      cisco.asa.asa_config:
+        lines:
+          - "hostname {{ hostvars[inventory_hostname].hostname | default('ASA-CLINICAL-POC') }}"
+          - "domain-name {{ domain_name }}"
+          - "service password-encryption"
+        match: line
+
+    # ── Interfaces ──────────────────────────────────────────────────────────
+    - name: "Configure Outside interface (GE1/1)"
+      cisco.asa.asa_config:
+        lines:
+          - "description OUTSIDE-INTERNET"
+          - "nameif outside"
+          - "security-level 0"
+          - "ip address {{ asa_outside_ip }} 255.255.255.0"
+          - "no shutdown"
+        parents: "interface GigabitEthernet1/1"
+        match: line
+
+    - name: "Configure Inside interface (GE1/2 – Clinical VLAN 10)"
+      cisco.asa.asa_config:
+        lines:
+          - "description INSIDE-CLINICAL-VLAN10"
+          - "nameif inside"
+          - "security-level 100"
+          - "ip address {{ asa_inside_ip }} 255.255.255.0"
+          - "no shutdown"
+        parents: "interface GigabitEthernet1/2"
+        match: line
+
+    - name: "Configure DMZ interface (GE1/3 – Management VLAN 20)"
+      cisco.asa.asa_config:
+        lines:
+          - "description DMZ-MANAGEMENT-VLAN20"
+          - "nameif dmz"
+          - "security-level 50"
+          - "ip address {{ asa_dmz_ip }} 255.255.255.0"
+          - "no shutdown"
+        parents: "interface GigabitEthernet1/3"
+        match: line
+
+    - name: "Shutdown unused interface GE1/4"
+      cisco.asa.asa_config:
+        lines:
+          - "description UNUSED"
+          - "shutdown"
+        parents: "interface GigabitEthernet1/4"
+
+    # ── Routing ─────────────────────────────────────────────────────────────
+    - name: "Configure default route"
+      cisco.asa.asa_config:
+        lines:
+          - "route outside 0.0.0.0 0.0.0.0 203.0.113.1 1"
+        match: line
+
+    # ── Network Objects ──────────────────────────────────────────────────────
+    - name: "Create network objects"
+      cisco.asa.asa_config:
+        lines:
+          - "object network OBJ-INSIDE-NET"
+          - " subnet {{ inside_net }} {{ inside_mask }}"
+          - " description Clinical VLAN 10"
+          - "object network OBJ-DMZ-NET"
+          - " subnet {{ dmz_net }} {{ dmz_mask }}"
+          - " description Management VLAN 20"
+          - "object network OBJ-VPN-POOL"
+          - " subnet {{ vpn_net }} {{ vpn_mask }}"
+          - " description AnyConnect VPN Pool"
+        match: line
+
+    # ── NAT ──────────────────────────────────────────────────────────────────
+    - name: "Configure NAT rules"
+      cisco.asa.asa_config:
+        lines:
+          - "nat (inside,outside) after-auto source dynamic OBJ-INSIDE-NET interface"
+          - "nat (dmz,outside) after-auto source dynamic OBJ-DMZ-NET interface"
+          - "nat (outside,inside) source static OBJ-VPN-POOL OBJ-VPN-POOL destination static OBJ-INSIDE-NET OBJ-INSIDE-NET no-proxy-arp route-lookup"
+        match: line
+
+    # ── ACLs ─────────────────────────────────────────────────────────────────
+    - name: "Configure outside-in ACL (permit VPN traffic only)"
+      cisco.asa.asa_acls:
+        config:
+          - name: ACL-OUTSIDE-IN
+            acl_type: extended
+            aces:
+              - grant: permit
+                protocol: tcp
+                source:
+                  any: true
+                destination:
+                  host: "{{ asa_outside_ip }}"
+                  port_protocol:
+                    eq: https
+                sequence: 10
+              - grant: permit
+                protocol: udp
+                source:
+                  any: true
+                destination:
+                  host: "{{ asa_outside_ip }}"
+                  port_protocol:
+                    eq: https
+                sequence: 20
+              - grant: deny
+                protocol: ip
+                source:
+                  any: true
+                destination:
+                  any: true
+                log: default
+                sequence: 1000
+        state: replaced
+
+    - name: "Configure inside-out ACL (clinical egress)"
+      cisco.asa.asa_acls:
+        config:
+          - name: ACL-INSIDE-OUT
+            acl_type: extended
+            aces:
+              - grant: permit
+                protocol: tcp
+                source:
+                  address: "{{ inside_net }}"
+                  netmask: "{{ inside_mask }}"
+                destination:
+                  any: true
+                  port_protocol:
+                    eq: https
+                sequence: 10
+              - grant: permit
+                protocol: tcp
+                source:
+                  address: "{{ inside_net }}"
+                  netmask: "{{ inside_mask }}"
+                destination:
+                  any: true
+                  port_protocol:
+                    eq: www
+                sequence: 20
+              - grant: permit
+                protocol: udp
+                source:
+                  address: "{{ inside_net }}"
+                  netmask: "{{ inside_mask }}"
+                destination:
+                  any: true
+                  port_protocol:
+                    eq: domain
+                sequence: 30
+              - grant: deny
+                protocol: ip
+                source:
+                  address: "{{ inside_net }}"
+                  netmask: "{{ inside_mask }}"
+                destination:
+                  address: "{{ dmz_net }}"
+                  netmask: "{{ dmz_mask }}"
+                log: default
+                sequence: 900
+              - grant: deny
+                protocol: ip
+                source:
+                  any: true
+                destination:
+                  any: true
+                log: default
+                sequence: 1000
+        state: replaced
+
+    - name: "Apply ACLs to interfaces"
+      cisco.asa.asa_config:
+        lines:
+          - "access-group ACL-OUTSIDE-IN  in interface outside"
+          - "access-group ACL-INSIDE-OUT  in interface inside"
+          - "access-group ACL-DMZ-TO-INSIDE in interface dmz"
+        match: line
+
+    # ── Split tunnel ACL ─────────────────────────────────────────────────────
+    - name: "Configure VPN split-tunnel ACL"
+      cisco.asa.asa_config:
+        lines:
+          - "access-list ACL-VPN-SPLIT standard permit {{ inside_net }} {{ inside_mask }}"
+          - "access-list ACL-VPN-SPLIT standard permit {{ dmz_net }} {{ dmz_mask }}"
+        match: line
+
+    # ── TLS / Crypto ──────────────────────────────────────────────────────────
+    - name: "Configure TLS policy"
+      cisco.asa.asa_config:
+        lines:
+          - "ssl server-version tlsv1.2"
+          - "ssl cipher tlsv1.2 high"
+          - "ssl dh-group group14"
+        match: line
+
+    # ── AnyConnect / WebVPN ───────────────────────────────────────────────────
+    - name: "Enable WebVPN and AnyConnect"
+      cisco.asa.asa_config:
+        lines:
+          - "enable outside"
+          - "anyconnect enable"
+          - "cache disable"
+          - "error-recovery disable"
+        parents: "webvpn"
+        match: line
+
+    # ── SAML IdP ─────────────────────────────────────────────────────────────
+    - name: "Configure SAML IdP (Entra ID)"
+      cisco.asa.asa_config:
+        lines:
+          - "url sign-in  https://login.microsoftonline.com/{{ azure_tenant_id }}/saml2"
+          - "url sign-out https://login.microsoftonline.com/{{ azure_tenant_id }}/saml2"
+          - "base-url     https://{{ asa_outside_ip }}"
+          - "trustpoint idp ENTRA-ID-CERT"
+          - "trustpoint sp  SELF-SIGNED"
+          - "no signature"
+          - "timeout assertion 1800"
+        parents: "saml idp https://sts.windows.net/{{ azure_tenant_id }}/"
+        match: line
+
+    # ── Group Policy ──────────────────────────────────────────────────────────
+    - name: "Configure VPN group policy"
+      cisco.asa.asa_config:
+        lines:
+          - "group-policy GP-CLINICAL-VPN internal"
+          - "group-policy GP-CLINICAL-VPN attributes"
+          - " vpn-tunnel-protocol ssl-client"
+          - " split-tunnel-policy tunnelspecified"
+          - " split-tunnel-network-list value ACL-VPN-SPLIT"
+          - " dns-server value {{ vpn_dns }}"
+          - " wins-server none"
+          - " default-domain value {{ domain_name }}"
+          - " vpn-session-timeout 480"
+          - " vpn-idle-timeout 30"
+        match: line
+
+    # ── VPN Pool & Tunnel Group ───────────────────────────────────────────────
+    - name: "Configure VPN address pool"
+      cisco.asa.asa_config:
+        lines:
+          - "ip local pool VPN-ADDRESS-POOL {{ asa_vpn_pool_start }}-{{ asa_vpn_pool_end }} mask {{ vpn_mask }}"
+        match: line
+
+    - name: "Configure tunnel group"
+      cisco.asa.asa_config:
+        lines:
+          - "tunnel-group CLINICAL-SAML type remote-access"
+          - "tunnel-group CLINICAL-SAML general-attributes"
+          - " address-pool VPN-ADDRESS-POOL"
+          - " default-group-policy GP-CLINICAL-VPN"
+          - " authorization-required"
+          - "tunnel-group CLINICAL-SAML webvpn-attributes"
+          - " authentication saml"
+          - " saml identity-provider https://sts.windows.net/{{ azure_tenant_id }}/"
+          - " group-alias ClinicalVPN enable"
+          - " without-csd"
+        match: line
+
+    # ── Syslog ────────────────────────────────────────────────────────────────
+    - name: "Configure syslog"
+      cisco.asa.asa_config:
+        lines:
+          - "logging enable"
+          - "logging timestamp"
+          - "logging buffered informational"
+          - "logging host inside {{ asa_syslog_server }} udp/514"
+          - "logging trap informational"
+          - "logging facility 20"
+          - "logging device-id hostname"
+        match: line
+
+    # ── SSH ───────────────────────────────────────────────────────────────────
+    - name: "Configure SSH access restrictions"
+      cisco.asa.asa_config:
+        lines:
+          - "ssh {{ dmz_net }} {{ dmz_mask }} dmz"
+          - "ssh {{ vpn_net }} {{ vpn_mask }} outside"
+          - "ssh timeout 10"
+          - "ssh version 2"
+          - "ssh key-exchange group dh-group14-sha256"
+          - "aaa authentication ssh console LOCAL"
+        match: line
+
+    # ── Threat Detection ──────────────────────────────────────────────────────
+    - name: "Enable threat detection"
+      cisco.asa.asa_config:
+        lines:
+          - "threat-detection basic-threat"
+          - "threat-detection statistics"
+          - "threat-detection statistics tcp-intercept rate-interval 30 burst-rate 400 average-rate 200"
+        match: line
+
+    # ── NTP ───────────────────────────────────────────────────────────────────
+    - name: "Configure NTP"
+      cisco.asa.asa_config:
+        lines:
+          - "ntp server {{ ntp_server }}"
+          - "ntp authenticate"
+        match: line
+
+    # ── Save ──────────────────────────────────────────────────────────────────
+    - name: "Save ASA configuration"
+      cisco.asa.asa_command:
+        commands:
+          - write memory
+
+    # ── Verify ───────────────────────────────────────────────────────────────
+    - name: "Verify interfaces are up"
+      cisco.asa.asa_command:
+        commands:
+          - show interface ip brief
+      register: intf_output
+
+    - name: "Display interface status"
+      ansible.builtin.debug:
+        msg: "{{ intf_output.stdout_lines }}"
+
+    - name: "Verify NAT table"
+      cisco.asa.asa_command:
+        commands:
+          - show nat detail
+      register: nat_output
+
+    - name: "Assert key IPs in interface output"
+      ansible.builtin.assert:
+        that:
+          - asa_outside_ip in intf_output.stdout[0]
+          - asa_inside_ip  in intf_output.stdout[0]
+          - asa_dmz_ip     in intf_output.stdout[0]
+        fail_msg: "Interface IPs not found in 'show interface ip brief'"
+        success_msg: "All three interface IPs confirmed in ASA."

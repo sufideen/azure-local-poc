@@ -1,0 +1,94 @@
+---
+# =============================================================================
+# Step 4 – Register Hyper-V Host with Azure Arc
+# =============================================================================
+
+- name: "Azure Arc – Host Registration"
+  hosts: hyperv_hosts
+  gather_facts: true
+
+  pre_tasks:
+    - name: "Ensure Azure CLI resource providers are registered (run on control node)"
+      ansible.builtin.shell: |
+        set -e
+        for ns in Microsoft.HybridCompute Microsoft.GuestConfiguration \
+                  Microsoft.HybridConnectivity Microsoft.AzureArcData; do
+          az provider register --namespace "$ns" --wait
+          echo "Registered: $ns"
+        done
+      delegate_to: localhost
+      changed_when: true
+
+  tasks:
+    - name: "Download Azure Connected Machine Agent installer"
+      ansible.windows.win_get_url:
+        url: "https://aka.ms/azcmagent-windows"
+        dest: "C:\\Temp\\install_windows_azcmagent.ps1"
+        force: false
+
+    - name: "Create Temp directory if not present"
+      ansible.windows.win_file:
+        path: "C:\\Temp"
+        state: directory
+
+    - name: "Install Azure Connected Machine Agent"
+      ansible.windows.win_shell: |
+        & "C:\Temp\install_windows_azcmagent.ps1"
+      args:
+        creates: "C:\\Program Files\\AzureConnectedMachineAgent\\azcmagent.exe"
+      register: arc_install
+
+    - name: "Wait for agent service to start"
+      ansible.windows.win_service:
+        name: himds
+        state: started
+        start_mode: auto
+
+    - name: "Check if already connected to Azure Arc"
+      ansible.windows.win_shell: |
+        & "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" show --json 2>$null |
+          ConvertFrom-Json | Select-Object -ExpandProperty status
+      register: arc_status
+      failed_when: false
+      changed_when: false
+
+    - name: "Connect to Azure Arc"
+      ansible.windows.win_shell: |
+        $env:AZURE_SUBSCRIPTION_ID = "{{ azure_subscription_id }}"
+        & "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" connect `
+          --service-principal-id     "{{ arc_sp_app_id }}" `
+          --service-principal-secret "{{ arc_sp_secret }}" `
+          --resource-group           "{{ azure_resource_group }}" `
+          --tenant-id                "{{ azure_tenant_id }}" `
+          --location                 "{{ azure_location }}" `
+          --subscription-id          "{{ azure_subscription_id }}" `
+          --resource-name            "az-local-host01" `
+          --tags                     "Environment=POC,Department=Clinical,Compliance=NHS"
+      no_log: true
+      when: arc_status.stdout.strip() | lower != "connected"
+      register: arc_connect
+
+    - name: "Verify Arc connection status"
+      ansible.windows.win_shell: |
+        & "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" show
+      register: arc_verify
+      changed_when: false
+
+    - name: "Assert Arc agent is connected"
+      ansible.builtin.assert:
+        that:
+          - "'Connected' in arc_verify.stdout"
+        fail_msg: "Azure Arc agent is NOT connected. Output: {{ arc_verify.stdout }}"
+        success_msg: "Azure Arc agent is CONNECTED."
+
+    - name: "Assign Azure Policy – Windows security baseline (via Azure CLI)"
+      ansible.builtin.shell: |
+        az policy assignment create \
+          --name "arc-windows-baseline-{{ inventory_hostname }}" \
+          --policy "72650e9f-97bc-4b2a-ab5f-9781a9fcecbc" \
+          --scope "/subscriptions/{{ azure_subscription_id }}/resourceGroups/{{ azure_resource_group }}" \
+          --location {{ azure_location }} \
+          --output none
+      delegate_to: localhost
+      changed_when: true
+      failed_when: false   # Policy may already exist
