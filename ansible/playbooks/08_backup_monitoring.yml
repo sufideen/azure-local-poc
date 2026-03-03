@@ -1,0 +1,227 @@
+---
+# =============================================================================
+# Step 8 – Enable Azure Backup and Monitoring
+# Runs against localhost (Azure control plane via Azure CLI)
+# =============================================================================
+
+- name: "Azure Backup and Monitoring – Setup"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    backup_policy_json: |
+      {
+        "schedulePolicy": {
+          "schedulePolicyType": "SimpleSchedulePolicy",
+          "scheduleRunFrequency": "Daily",
+          "scheduleRunTimes": ["2026-03-03T02:00:00Z"],
+          "scheduleWeeklyFrequency": 0
+        },
+        "retentionPolicy": {
+          "retentionPolicyType": "LongTermRetentionPolicy",
+          "dailySchedule": {
+            "retentionTimes": ["2026-03-03T02:00:00Z"],
+            "retentionDuration": {
+              "count": {{ backup_retention_days }},
+              "durationType": "Days"
+            }
+          },
+          "weeklySchedule": {
+            "daysOfTheWeek": ["Sunday"],
+            "retentionTimes": ["2026-03-03T02:00:00Z"],
+            "retentionDuration": {
+              "count": 12,
+              "durationType": "Weeks"
+            }
+          },
+          "monthlySchedule": {
+            "retentionScheduleFormatType": "Weekly",
+            "retentionScheduleWeekly": [
+              {
+                "daysOfTheWeek": ["Sunday"],
+                "weeksOfTheMonth": ["First"]
+              }
+            ],
+            "retentionTimes": ["2026-03-03T02:00:00Z"],
+            "retentionDuration": {
+              "count": 12,
+              "durationType": "Months"
+            }
+          }
+        },
+        "timeZone": "UTC"
+      }
+
+  tasks:
+    # ── Log Analytics Workspace ───────────────────────────────────────────────
+    - name: "Create Log Analytics Workspace"
+      ansible.builtin.shell: |
+        az monitor log-analytics workspace create \
+          --resource-group {{ azure_resource_group }} \
+          --workspace-name {{ law_workspace_name }} \
+          --location       {{ azure_location }} \
+          --sku            PerGB2018 \
+          --retention-time 90 \
+          --output         json
+      register: law_create
+      changed_when: true
+      failed_when: law_create.rc != 0 and 'already exists' not in law_create.stderr
+
+    - name: "Get Log Analytics workspace details"
+      ansible.builtin.shell: |
+        az monitor log-analytics workspace show \
+          --resource-group {{ azure_resource_group }} \
+          --workspace-name {{ law_workspace_name }} \
+          --query "{id:id, customerId:customerId}" \
+          --output json
+      register: law_details
+      changed_when: false
+
+    - name: "Set workspace ID fact"
+      ansible.builtin.set_fact:
+        law_workspace_id: "{{ (law_details.stdout | from_json).customerId }}"
+        law_resource_id:  "{{ (law_details.stdout | from_json).id }}"
+
+    - name: "Enable Security solutions in Log Analytics"
+      ansible.builtin.shell: |
+        az security workspace-setting create \
+          --name default \
+          --target-workspace "{{ law_resource_id }}" \
+          --output none
+      changed_when: true
+      failed_when: false
+
+    # ── Recovery Services Vault ───────────────────────────────────────────────
+    - name: "Create Recovery Services Vault"
+      ansible.builtin.shell: |
+        az backup vault create \
+          --resource-group {{ azure_resource_group }} \
+          --name           {{ rsv_name }} \
+          --location       {{ azure_location }} \
+          --output         none
+      changed_when: true
+      failed_when: false
+
+    - name: "Set backup storage redundancy to GeoRedundant"
+      ansible.builtin.shell: |
+        az backup vault backup-properties set \
+          --resource-group         {{ azure_resource_group }} \
+          --name                   {{ rsv_name }} \
+          --backup-storage-redundancy GeoRedundant \
+          --soft-delete-feature-state Enable \
+          --output                 none
+      changed_when: true
+
+    - name: "Write backup policy JSON to temp file"
+      ansible.builtin.copy:
+        content: "{{ backup_policy_json }}"
+        dest: "/tmp/backup_policy.json"
+        mode: "0600"
+
+    - name: "Create Azure VM backup policy"
+      ansible.builtin.shell: |
+        az backup policy create \
+          --resource-group {{ azure_resource_group }} \
+          --vault-name     {{ rsv_name }} \
+          --name           {{ backup_policy_name }} \
+          --backup-management-type AzureIaasVM \
+          --policy         @/tmp/backup_policy.json \
+          --output         none
+      changed_when: true
+      failed_when: false
+
+    # ── Azure Monitor Alerts ──────────────────────────────────────────────────
+    - name: "Create Action Group for clinical alerts"
+      ansible.builtin.shell: |
+        az monitor action-group create \
+          --resource-group  {{ azure_resource_group }} \
+          --name            ag-clinical-alerts \
+          --short-name      ClinAlerts \
+          --output          none
+      changed_when: true
+      failed_when: false
+
+    - name: "Create CPU high alert for Clinical VM"
+      ansible.builtin.shell: |
+        az monitor metrics alert create \
+          --resource-group       {{ azure_resource_group }} \
+          --name                 "alert-clinical-vm-cpu-high" \
+          --description          "CPU > 90% for 5 minutes on clinical VM" \
+          --scopes               "/subscriptions/{{ azure_subscription_id }}/resourceGroups/{{ azure_resource_group }}/providers/Microsoft.HybridCompute/machines/clinical-vm-01" \
+          --condition            "avg Percentage CPU > 90" \
+          --window-size          5m \
+          --evaluation-frequency 1m \
+          --severity             2 \
+          --output               none
+      changed_when: true
+      failed_when: false
+
+    - name: "Create Arc agent disconnected alert"
+      ansible.builtin.shell: |
+        az monitor activity-log alert create \
+          --resource-group   {{ azure_resource_group }} \
+          --name             "alert-arc-agent-disconnected" \
+          --description      "Azure Arc agent disconnected" \
+          --scope            "/subscriptions/{{ azure_subscription_id }}/resourceGroups/{{ azure_resource_group }}" \
+          --condition        "category=ResourceHealth and resourceType=Microsoft.HybridCompute/machines and status=Resolved" \
+          --output           none
+      changed_when: true
+      failed_when: false
+
+    # ── Connect Arc Machines to Log Analytics ─────────────────────────────────
+    - name: "Get Log Analytics workspace key"
+      ansible.builtin.shell: |
+        az monitor log-analytics workspace get-shared-keys \
+          --resource-group {{ azure_resource_group }} \
+          --workspace-name {{ law_workspace_name }} \
+          --query primarySharedKey -o tsv
+      register: law_key
+      changed_when: false
+      no_log: true
+
+    - name: "Install MMA extension on Hyper-V host"
+      ansible.builtin.shell: |
+        az connectedmachine extension create \
+          --resource-group      {{ azure_resource_group }} \
+          --machine-name        az-local-host01 \
+          --name                MicrosoftMonitoringAgent \
+          --type                MicrosoftMonitoringAgent \
+          --publisher           Microsoft.EnterpriseCloud.Monitoring \
+          --settings            '{"workspaceId":"{{ law_workspace_id }}"}' \
+          --protected-settings  '{"workspaceKey":"{{ law_key.stdout.strip() }}"}' \
+          --output              none
+      changed_when: true
+      no_log: true
+
+    - name: "Verify Log Analytics workspace resource"
+      ansible.builtin.shell: |
+        az monitor log-analytics workspace show \
+          --resource-group {{ azure_resource_group }} \
+          --workspace-name {{ law_workspace_name }} \
+          --query provisioningState -o tsv
+      register: law_state
+      changed_when: false
+
+    - name: "Assert workspace is provisioned"
+      ansible.builtin.assert:
+        that:
+          - law_state.stdout.strip() == "Succeeded"
+        fail_msg: "Log Analytics workspace not in Succeeded state: {{ law_state.stdout }}"
+        success_msg: "Log Analytics workspace is provisioned."
+
+    - name: "Verify Recovery Services Vault"
+      ansible.builtin.shell: |
+        az backup vault show \
+          --resource-group {{ azure_resource_group }} \
+          --name           {{ rsv_name }} \
+          --query provisioningState -o tsv
+      register: rsv_state
+      changed_when: false
+
+    - name: "Assert RSV is provisioned"
+      ansible.builtin.assert:
+        that:
+          - rsv_state.stdout.strip() == "Succeeded"
+        fail_msg: "Recovery Services Vault not provisioned: {{ rsv_state.stdout }}"
+        success_msg: "Recovery Services Vault is provisioned."

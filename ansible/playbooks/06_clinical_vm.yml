@@ -1,0 +1,133 @@
+---
+# =============================================================================
+# Step 6 – Deploy Clinical VM on Hyper-V
+# =============================================================================
+
+- name: "Clinical VM – Hyper-V Deployment"
+  hosts: hyperv_hosts
+  gather_facts: false
+
+  vars:
+    vm_name:        "CLINICAL-VM-01"
+    vm_path:        "D:\\VMs\\CLINICAL-VM-01"
+    vhd_path:       "D:\\VMs\\CLINICAL-VM-01\\CLINICAL-VM-01-OS.vhdx"
+    iso_path:       "D:\\ISO\\WindowsServer2022.iso"
+    vm_ram_gb:      8
+    vm_min_ram_gb:  4
+    vm_max_ram_gb:  16
+    vm_cpu:         4
+    vhd_size_gb:    127
+    vm_vlan_id:     10
+    vm_static_mac:  "00155D010A01"
+
+  tasks:
+    - name: "Ensure VM storage directory exists"
+      ansible.windows.win_file:
+        path: "{{ vm_path }}"
+        state: directory
+
+    - name: "Ensure ISO directory exists"
+      ansible.windows.win_file:
+        path: "D:\\ISO"
+        state: directory
+
+    - name: "Check if VM already exists"
+      ansible.windows.win_shell: |
+        (Get-VM -Name "{{ vm_name }}" -ErrorAction SilentlyContinue) -ne $null
+      register: vm_exists
+      changed_when: false
+
+    - name: "Create Clinical VM"
+      ansible.windows.win_shell: |
+        New-VM -Name "{{ vm_name }}" `
+          -Path "{{ vm_path }}" `
+          -Generation 2 `
+          -MemoryStartupBytes {{ vm_ram_gb }}GB `
+          -NewVHDPath "{{ vhd_path }}" `
+          -NewVHDSizeBytes {{ vhd_size_gb }}GB `
+          -SwitchName "{{ vm_switch_name }}"
+
+        Set-VM -Name "{{ vm_name }}" `
+          -ProcessorCount {{ vm_cpu }} `
+          -DynamicMemory `
+          -MemoryMinimumBytes {{ vm_min_ram_gb }}GB `
+          -MemoryMaximumBytes {{ vm_max_ram_gb }}GB `
+          -AutomaticStartAction Start `
+          -AutomaticStopAction ShutDown `
+          -CheckpointType Disabled
+
+        Write-Output "VM Created"
+      when: vm_exists.stdout.strip() == "False"
+      register: vm_create
+
+    - name: "Configure VM security – Secure Boot and TPM"
+      ansible.windows.win_shell: |
+        Set-VMFirmware -VMName "{{ vm_name }}" `
+          -EnableSecureBoot On `
+          -SecureBootTemplate "MicrosoftWindows"
+        Enable-VMTPM -VMName "{{ vm_name }}"
+        Write-Output "Security configured"
+      when: vm_exists.stdout.strip() == "False"
+      changed_when: true
+
+    - name: "Set VLAN on VM network adapter"
+      ansible.windows.win_shell: |
+        Set-VMNetworkAdapterVlan -VMName "{{ vm_name }}" `
+          -VlanId {{ vm_vlan_id }} -Access
+      changed_when: true
+
+    - name: "Set static MAC address on VM NIC"
+      ansible.windows.win_shell: |
+        Set-VMNetworkAdapter -VMName "{{ vm_name }}" `
+          -StaticMacAddress "{{ vm_static_mac }}"
+      changed_when: true
+
+    - name: "Attach OS installation ISO"
+      ansible.windows.win_shell: |
+        $dvd = Get-VMDvdDrive -VMName "{{ vm_name }}" -ErrorAction SilentlyContinue
+        if (-not $dvd) {
+          Add-VMDvdDrive -VMName "{{ vm_name }}" -Path "{{ iso_path }}"
+        } else {
+          Set-VMDvdDrive -VMName "{{ vm_name }}" -Path "{{ iso_path }}"
+        }
+      changed_when: true
+
+    - name: "Set boot order to DVD first"
+      ansible.windows.win_shell: |
+        $dvd = Get-VMDvdDrive -VMName "{{ vm_name }}"
+        Set-VMFirmware -VMName "{{ vm_name }}" -FirstBootDevice $dvd
+      changed_when: true
+
+    - name: "Start VM for OS installation"
+      ansible.windows.win_shell: |
+        $vm = Get-VM -Name "{{ vm_name }}"
+        if ($vm.State -ne "Running") {
+          Start-VM -Name "{{ vm_name }}"
+          Write-Output "Started"
+        } else {
+          Write-Output "Already running"
+        }
+      register: vm_start
+      changed_when: "'Started' in vm_start.stdout"
+
+    - name: "Display VM console connection info"
+      ansible.builtin.debug:
+        msg:
+          - "VM '{{ vm_name }}' is running."
+          - "Connect to console: vmconnect.exe {{ inventory_hostname }} {{ vm_name }}"
+          - "Install Windows Server 2022 Datacenter: Azure Edition"
+          - "Assign IP: {{ hostvars['clinical-vm-01'].vm_static_ip | default('192.168.10.10') }}/24"
+          - "Gateway: {{ hostvars['clinical-vm-01'].vm_gateway | default('192.168.10.1') }}"
+
+    - name: "Verify VM is running"
+      ansible.windows.win_shell: |
+        (Get-VM -Name "{{ vm_name }}").State
+      register: vm_state
+      changed_when: false
+
+    - name: "Assert VM is running"
+      ansible.builtin.assert:
+        that:
+          - vm_state.stdout.strip() == "Running"
+        fail_msg: "VM state is '{{ vm_state.stdout.strip() }}' – expected Running"
+        success_msg: "Clinical VM is Running."

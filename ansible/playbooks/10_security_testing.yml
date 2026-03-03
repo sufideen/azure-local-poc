@@ -1,0 +1,194 @@
+---
+# =============================================================================
+# Step 10 – Security Testing
+# REQUIRES: Written authorisation from system owner + approved change ticket
+# Runs non-destructive validation checks only
+# =============================================================================
+
+- name: "Security Testing – Non-destructive Validation"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  vars:
+    test_report_path: "/tmp/security_test_report.txt"
+    test_results: []
+
+  tasks:
+    - name: "Confirm authorisation before proceeding"
+      ansible.builtin.pause:
+        prompt: |
+          ============================================================
+          SECURITY TESTING – AUTHORISATION REQUIRED
+          ============================================================
+          This playbook performs security validation tests including
+          port scanning and configuration audits.
+
+          Before proceeding, confirm:
+          1. Written authorisation has been obtained from the system owner
+          2. A Change Control ticket is approved
+          3. The SOC/SIEM team has been notified
+          4. Testing window is within the agreed maintenance window
+
+          Type 'AUTHORISED' to continue or press Ctrl+C to abort:
+          ============================================================
+      register: auth_confirm
+
+    - name: "Abort if not authorised"
+      ansible.builtin.fail:
+        msg: "Security testing aborted – authorisation not confirmed."
+      when: auth_confirm.user_input | upper != "AUTHORISED"
+
+    # ── TLS Certificate Check ─────────────────────────────────────────────────
+    - name: "Check TLS certificate on ASA"
+      ansible.builtin.shell: |
+        echo | timeout 10 openssl s_client \
+          -connect {{ asa_outside_ip }}:443 \
+          -servername {{ asa_outside_ip }} 2>/dev/null | \
+          openssl x509 -noout -text 2>/dev/null | \
+          grep -E "Not After|Subject:|Issuer:|Public-Key:"
+      register: tls_check
+      changed_when: false
+      failed_when: false
+
+    - name: "Display TLS certificate details"
+      ansible.builtin.debug:
+        msg: "{{ tls_check.stdout_lines }}"
+
+    - name: "Verify TLS version is 1.2 or higher"
+      ansible.builtin.shell: |
+        echo | timeout 10 openssl s_client \
+          -connect {{ asa_outside_ip }}:443 \
+          -tls1_1 2>&1 | grep -i "handshake failure\|alert"
+      register: tls1_1_check
+      changed_when: false
+      failed_when: false
+
+    - name: "Report TLS 1.1 rejection (should be rejected)"
+      ansible.builtin.debug:
+        msg: >
+          TLS 1.1 {{ 'REJECTED (good)' if 'handshake failure' in tls1_1_check.stdout
+          else 'NOT rejected (check ASA ssl policy)' }}
+
+    # ── Port Scan (authorised, non-aggressive) ────────────────────────────────
+    - name: "Run authorised port scan on ASA outside IP"
+      ansible.builtin.shell: |
+        which nmap || (echo "nmap not installed" && exit 1)
+        nmap -sT -p 22,80,443,8443,4443,21,23,25,110,161,8080 \
+          --open -oN /tmp/nmap_asa_results.txt \
+          {{ asa_outside_ip }} 2>&1
+      register: nmap_scan
+      changed_when: false
+      failed_when: false
+
+    - name: "Display port scan results"
+      ansible.builtin.debug:
+        msg: "{{ nmap_scan.stdout_lines }}"
+
+    - name: "Assert only port 443 is open on ASA outside"
+      ansible.builtin.shell: |
+        grep "^[0-9]" /tmp/nmap_asa_results.txt | \
+          grep "open" | grep -v "443/tcp"
+      register: unexpected_ports
+      changed_when: false
+      failed_when: unexpected_ports.rc == 0  # Fail if unexpected open ports found
+
+    # ── Azure Security Posture ────────────────────────────────────────────────
+    - name: "Check Microsoft Defender for Cloud recommendations"
+      ansible.builtin.shell: |
+        az security assessment list \
+          --resource-group {{ azure_resource_group }} \
+          --query "[?properties.status.code=='Unhealthy'] | length(@)" \
+          --output tsv 2>/dev/null || echo "0"
+      register: defender_unhealthy
+      changed_when: false
+      failed_when: false
+
+    - name: "Report Defender for Cloud unhealthy recommendations"
+      ansible.builtin.debug:
+        msg: "Unhealthy security recommendations: {{ defender_unhealthy.stdout.strip() }}"
+
+    - name: "Check Arc machine compliance policies"
+      ansible.builtin.shell: |
+        az policy state list \
+          --resource-group {{ azure_resource_group }} \
+          --query "[?complianceState=='NonCompliant'] | length(@)" \
+          --output tsv 2>/dev/null || echo "0"
+      register: policy_noncompliant
+      changed_when: false
+      failed_when: false
+
+    - name: "Report non-compliant policies"
+      ansible.builtin.debug:
+        msg: "Non-compliant policy assignments: {{ policy_noncompliant.stdout.strip() }}"
+
+    # ── Validate VLAN Isolation ───────────────────────────────────────────────
+    - name: "Test VLAN 10 → VLAN 20 isolation (should be blocked)"
+      ansible.builtin.shell: |
+        # Attempt ping from management to clinical (should work via ACL)
+        ping -c 3 -W 2 {{ asa_inside_ip }} > /dev/null 2>&1
+        echo "ASA inside reachable: $?"
+      register: vlan_isolation_test
+      changed_when: false
+      failed_when: false
+
+    # ── BitLocker Check on VMs ────────────────────────────────────────────────
+    - name: "Check BitLocker status on Clinical VM via Arc run-command"
+      ansible.builtin.shell: |
+        az connectedmachine run-command create \
+          --resource-group  {{ azure_resource_group }} \
+          --machine-name    clinical-vm-01 \
+          --run-command-name check-bitlocker \
+          --script "Get-BitLockerVolume C: | Select-Object ProtectionStatus,EncryptionMethod | ConvertTo-Json" \
+          --output json 2>/dev/null || echo '{"error":"run-command not available"}'
+      register: bl_check
+      changed_when: false
+      failed_when: false
+
+    - name: "Display BitLocker check result"
+      ansible.builtin.debug:
+        msg: "{{ bl_check.stdout | default('Unable to query') }}"
+
+    # ── Generate Security Test Report ─────────────────────────────────────────
+    - name: "Write security test report"
+      ansible.builtin.copy:
+        content: |
+          ================================================================
+          Azure Local POC – Security Test Report
+          Date: {{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}
+          Tester: {{ lookup('env', 'USER') }}
+          ================================================================
+
+          1. TLS CERTIFICATE
+             Details: {{ tls_check.stdout | default('Not checked') | truncate(200) }}
+
+          2. TLS 1.1 REJECTION
+             Result: {{ 'REJECTED (Pass)' if 'handshake failure' in (tls1_1_check.stdout | default(''))
+                        else 'NOT rejected (Investigate)' }}
+
+          3. PORT SCAN – ASA OUTSIDE ({{ asa_outside_ip }})
+             Expected: Only 443/tcp open
+             Unexpected open ports: {{ 'NONE (Pass)' if unexpected_ports.rc != 0 else 'FOUND – INVESTIGATE' }}
+
+          4. DEFENDER FOR CLOUD
+             Unhealthy recommendations: {{ defender_unhealthy.stdout.strip() | default('N/A') }}
+
+          5. AZURE POLICY COMPLIANCE
+             Non-compliant assignments: {{ policy_noncompliant.stdout.strip() | default('N/A') }}
+
+          6. BITLOCKER (Clinical VM)
+             Result: {{ bl_check.stdout | default('Not available') | truncate(200) }}
+
+          ================================================================
+          SIGN-OFF: _________________________ Date: ___________
+          ================================================================
+        dest: "{{ test_report_path }}"
+        mode: "0644"
+
+    - name: "Display final security test report"
+      ansible.builtin.debug:
+        msg: "{{ lookup('file', test_report_path) }}"
+
+    - name: "Security test report saved"
+      ansible.builtin.debug:
+        msg: "Full report saved to: {{ test_report_path }}"

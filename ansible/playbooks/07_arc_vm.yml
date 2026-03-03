@@ -1,0 +1,101 @@
+---
+# =============================================================================
+# Step 7 – Install Azure Arc Agent on Clinical VM
+# =============================================================================
+
+- name: "Azure Arc – Clinical VM Registration"
+  hosts: clinical_vms
+  gather_facts: true
+
+  tasks:
+    - name: "Create Temp directory"
+      ansible.windows.win_file:
+        path: "C:\\Temp"
+        state: directory
+
+    - name: "Download Arc agent installer"
+      ansible.windows.win_get_url:
+        url: "https://aka.ms/azcmagent-windows"
+        dest: "C:\\Temp\\install_windows_azcmagent.ps1"
+        force: false
+
+    - name: "Install Azure Connected Machine Agent"
+      ansible.windows.win_shell: |
+        & "C:\Temp\install_windows_azcmagent.ps1"
+      args:
+        creates: "C:\\Program Files\\AzureConnectedMachineAgent\\azcmagent.exe"
+
+    - name: "Ensure himds service is running"
+      ansible.windows.win_service:
+        name: himds
+        state: started
+        start_mode: auto
+
+    - name: "Check Arc agent status"
+      ansible.windows.win_shell: |
+        & "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" show 2>&1
+      register: arc_status
+      changed_when: false
+      failed_when: false
+
+    - name: "Connect Clinical VM to Azure Arc"
+      ansible.windows.win_shell: |
+        & "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" connect `
+          --service-principal-id     "{{ arc_sp_app_id }}" `
+          --service-principal-secret "{{ arc_sp_secret }}" `
+          --resource-group           "{{ azure_resource_group }}" `
+          --tenant-id                "{{ azure_tenant_id }}" `
+          --location                 "{{ azure_location }}" `
+          --subscription-id          "{{ azure_subscription_id }}" `
+          --resource-name            "clinical-vm-01" `
+          --tags                     "Environment=POC,Department=Clinical,Role=ClinicalWorkstation,VLAN=10"
+      no_log: true
+      when: "'Connected' not in arc_status.stdout"
+
+    - name: "Verify Arc agent is connected"
+      ansible.windows.win_shell: |
+        & "C:\Program Files\AzureConnectedMachineAgent\azcmagent.exe" show
+      register: arc_verify
+      changed_when: false
+
+    - name: "Assert Arc connection"
+      ansible.builtin.assert:
+        that:
+          - "'Connected' in arc_verify.stdout"
+        fail_msg: "Arc agent NOT connected on Clinical VM"
+        success_msg: "Arc agent CONNECTED on Clinical VM"
+
+    - name: "Install Log Analytics MMA extension via Azure CLI"
+      ansible.builtin.shell: |
+        WORKSPACE_ID=$(az monitor log-analytics workspace show \
+          --resource-group {{ azure_resource_group }} \
+          --workspace-name {{ law_workspace_name }} \
+          --query customerId -o tsv)
+        WORKSPACE_KEY=$(az monitor log-analytics workspace get-shared-keys \
+          --resource-group {{ azure_resource_group }} \
+          --workspace-name {{ law_workspace_name }} \
+          --query primarySharedKey -o tsv)
+        az connectedmachine extension create \
+          --resource-group {{ azure_resource_group }} \
+          --machine-name   clinical-vm-01 \
+          --name           MicrosoftMonitoringAgent \
+          --type           MicrosoftMonitoringAgent \
+          --publisher      Microsoft.EnterpriseCloud.Monitoring \
+          --settings       "{\"workspaceId\":\"$WORKSPACE_ID\"}" \
+          --protected-settings "{\"workspaceKey\":\"$WORKSPACE_KEY\"}" \
+          --output none
+      delegate_to: localhost
+      changed_when: true
+
+    - name: "Install Microsoft Defender for Endpoint extension"
+      ansible.builtin.shell: |
+        az connectedmachine extension create \
+          --resource-group {{ azure_resource_group }} \
+          --machine-name   clinical-vm-01 \
+          --name           MDE.Windows \
+          --type           MDE.Windows \
+          --publisher      Microsoft.Azure.AzureDefenderForServers \
+          --output none
+      delegate_to: localhost
+      changed_when: true
+      failed_when: false   # MDE requires Defender for Cloud plan

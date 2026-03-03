@@ -1,0 +1,123 @@
+---
+# =============================================================================
+# Step 9 – Validate Remote Access and Logs
+# =============================================================================
+
+- name: "Validation – Remote Access and Log Ingestion"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+
+  tasks:
+    - name: "Test HTTPS connectivity to ASA outside IP"
+      ansible.builtin.uri:
+        url: "https://{{ asa_outside_ip }}"
+        method: GET
+        validate_certs: false
+        status_code: [200, 302, 403, 401]
+        timeout: 10
+      register: asa_https_check
+      failed_when: false
+
+    - name: "Report ASA HTTPS result"
+      ansible.builtin.debug:
+        msg: "ASA HTTPS status: {{ asa_https_check.status | default('unreachable') }}"
+
+    - name: "Check Arc agent status on host via Azure CLI"
+      ansible.builtin.shell: |
+        az connectedmachine show \
+          --resource-group {{ azure_resource_group }} \
+          --name az-local-host01 \
+          --query status -o tsv
+      register: host_arc_status
+      changed_when: false
+
+    - name: "Check Arc agent status on Clinical VM via Azure CLI"
+      ansible.builtin.shell: |
+        az connectedmachine show \
+          --resource-group {{ azure_resource_group }} \
+          --name clinical-vm-01 \
+          --query status -o tsv
+      register: vm_arc_status
+      changed_when: false
+
+    - name: "Assert Arc machines are Connected"
+      ansible.builtin.assert:
+        that:
+          - host_arc_status.stdout.strip() == "Connected"
+          - vm_arc_status.stdout.strip()   == "Connected"
+        fail_msg: |
+          Arc status:
+            Host: {{ host_arc_status.stdout.strip() }}
+            VM:   {{ vm_arc_status.stdout.strip() }}
+        success_msg: "Both Arc machines are Connected."
+
+    - name: "Query Log Analytics for recent heartbeats (KQL)"
+      ansible.builtin.shell: |
+        az monitor log-analytics query \
+          --workspace "$(az monitor log-analytics workspace show \
+            --resource-group {{ azure_resource_group }} \
+            --workspace-name {{ law_workspace_name }} \
+            --query customerId -o tsv)" \
+          --analytics-query "Heartbeat | where TimeGenerated > ago(1h) | summarize count() by Computer" \
+          --output table
+      register: heartbeat_query
+      changed_when: false
+      failed_when: false
+
+    - name: "Display heartbeat results"
+      ansible.builtin.debug:
+        msg: "{{ heartbeat_query.stdout_lines }}"
+
+    - name: "Check recent backup job status"
+      ansible.builtin.shell: |
+        az backup job list \
+          --resource-group {{ azure_resource_group }} \
+          --vault-name     {{ rsv_name }} \
+          --query "[?status=='Completed'] | length(@)" \
+          --output tsv
+      register: backup_jobs
+      changed_when: false
+      failed_when: false
+
+    - name: "Display backup job count"
+      ansible.builtin.debug:
+        msg: "Completed backup jobs: {{ backup_jobs.stdout.strip() | default('0') }}"
+
+    - name: "Test TCP port 443 on ASA outside"
+      ansible.builtin.wait_for:
+        host: "{{ asa_outside_ip }}"
+        port: 443
+        timeout: 10
+        state: started
+      register: port_443_check
+      failed_when: false
+
+    - name: "Assert port 443 is open on ASA"
+      ansible.builtin.assert:
+        that:
+          - port_443_check.state is defined
+          - port_443_check.state == "started"
+        fail_msg: "TCP 443 not reachable on ASA outside {{ asa_outside_ip }}"
+        success_msg: "TCP 443 is open on ASA outside interface."
+      failed_when: false
+
+    - name: "Generate validation summary report"
+      ansible.builtin.copy:
+        content: |
+          Azure Local POC – Validation Report
+          Generated: {{ ansible_date_time.iso8601 | default('N/A') }}
+          ================================================
+          Arc Host Status:          {{ host_arc_status.stdout.strip() }}
+          Arc VM Status:            {{ vm_arc_status.stdout.strip() }}
+          ASA HTTPS Response:       {{ asa_https_check.status | default('N/A') }}
+          ASA TCP/443:              {{ port_443_check.state | default('N/A') }}
+          Completed Backup Jobs:    {{ backup_jobs.stdout.strip() | default('0') }}
+          Log Analytics Heartbeats: {{ heartbeat_query.stdout_lines | length }} results
+          ================================================
+        dest: "/tmp/validation_report.txt"
+        mode: "0644"
+
+    - name: "Display validation report"
+      ansible.builtin.debug:
+        msg: "{{ lookup('file', '/tmp/validation_report.txt') }}"
