@@ -1,0 +1,14 @@
+---
+# Validation script configuration
+# Copy and edit for your environment
+
+validate:
+  idrac_ip:           "192.168.20.254"
+  host_ip:            "192.168.20.10"
+  clinical_vm_ip:     "192.168.10.10"
+  asa_outside_ip:     "203.0.113.10"
+  resource_group:     "rg-clinical-poc"
+  arc_host_name:      "az-local-host01"
+  arc_vm_name:        "clinical-vm-01"
+  rsv_name:           "rsv-clinical-poc"
+  law_workspace_name: "law-clinical-poc"
