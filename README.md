@@ -292,3 +292,10 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). PRs welcome for:
 ## Licence
 
 MIT – free to use on client engagements, internal POCs and training sessions.
+
+## Data and privacy note
+
+This is a lab and training build. The "clinical" network segments are simulated. No
+patient data, health records or real personal data are used or stored. If adapted for
+a real clinical environment, health data is special-category data under UK GDPR and
+needs a data protection impact assessment and appropriate technical controls.
